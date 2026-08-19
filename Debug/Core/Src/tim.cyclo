@@ -1,5 +1,0 @@
-../Core/Src/tim.c:5:6:TIM_Init	4
-../Core/Src/tim.c:21:6:TIM_Init_ms	3
-../Core/Src/tim.c:37:6:TIM_Start	1
-../Core/Src/tim.c:41:6:TIM_Stop	1
-../Core/Src/tim.c:45:9:TIM_Ready	2

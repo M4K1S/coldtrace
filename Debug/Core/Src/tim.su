@@ -1,5 +1,0 @@
-../Core/Src/tim.c:5:6:TIM_Init	24	static
-../Core/Src/tim.c:21:6:TIM_Init_ms	32	static
-../Core/Src/tim.c:37:6:TIM_Start	16	static
-../Core/Src/tim.c:41:6:TIM_Stop	16	static
-../Core/Src/tim.c:45:9:TIM_Ready	16	static

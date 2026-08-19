@@ -1,5 +1,0 @@
-../Core/Src/uart.c:46:6:UART_Init	40	static
-../Core/Src/uart.c:128:6:UART_SendChar	16	static
-../Core/Src/uart.c:135:6:UART_SendString	24	static
-../Core/Src/uart.c:142:6:UART_ReceiveChar	16	static
-../Core/Src/uart.c:150:6:UART_WaitForTC	16	static
