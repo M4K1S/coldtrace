@@ -153,4 +153,7 @@ void UART_WaitForTC(USART_TypeDef *port) {
     }
 }
 
+uint8_t UART_DataAvailable(USART_TypeDef *port) {
+    return (port->SR & (0b1U << 5)) != 0; // Checks RXNE bit if there is any data
+}
 
