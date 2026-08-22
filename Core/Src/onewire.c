@@ -1,10 +1,4 @@
 #include "onewire.h"
-#include "gpio.h"
-#include "tim.h"
-
-#include "onewire.h"
-#include "gpio.h"
-#include "tim.h"
 
 void ow_init(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port) {
     GPIO_Init(gpio_port, pin, OUTPUT, OPEN_DRAIN); // open-drain setup
@@ -83,6 +77,4 @@ uint8_t ow_read_byte(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port
         byte |= bit << i; // Put bit into byte LSB
     }
     return byte;
-}
-
 }
