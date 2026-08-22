@@ -14,6 +14,10 @@ void I2C_Init(I2C_TypeDef *port, I2C_SPEED speed){
 
         GPIOB->MODER &= ~((0b11U << 16) | (0b11U << 18)); // Clear PB8 & PB9
         GPIOB->MODER |= (0b10U << 16) | (0b10U << 18);     // Set PB8 & PB9 to AF
+        GPIOB->OTYPER |= (0b1U << 8) | (0b1U << 9); // Set PB8 & PB9 to open-drain
+        GPIOB->PUPDR &= ~((0b11U << 16) | (0b11U << 18)); // Clear PB8 & PB9 pull config
+        GPIOB->PUPDR |= (0b01U << 16) | (0b01U << 18);     // Set PB8 & PB9 to pull-up
+
 
         GPIOB->AFR[1] &= ~((0b1111U << 0) | (0b1111U << 4)); // Clear AF for PB8 (bits 0-3) & PB9 (bits 4-7)
         GPIOB->AFR[1] |= (0b0100U << 0) | (0b0100U << 4);    // Set AF4
@@ -32,4 +36,8 @@ void I2C_Init(I2C_TypeDef *port, I2C_SPEED speed){
     }
 
     port->CR1 |= (0b1U); // Set PE bit to 1 - enable I2C
+}
+
+void I2C_Start(I2C_TypeDef *port){
+
 }

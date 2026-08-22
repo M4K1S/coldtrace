@@ -1,4 +1,4 @@
-#include "stm32f4xx_hal.h"
+#include "pwm.h"
 
 static const uint32_t fCK = 16000000U; // Clock speed of TIM
 

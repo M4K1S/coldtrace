@@ -2,6 +2,9 @@
 #ifndef INC_PWM_H_
 #define INC_PWM_H_
 
+#include <stdint.h>
+#include "stm32f4xx.h"
+
 void PWM_Init(TIM_TypeDef *port, uint8_t channel, uint32_t frequency, uint8_t dutyCycle);
 void PWM_Start(TIM_TypeDef *port, uint8_t channel);
 void PWM_SetDuty(TIM_TypeDef *port, uint8_t channel, uint8_t dutyCycle);

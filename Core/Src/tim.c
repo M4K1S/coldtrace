@@ -1,4 +1,4 @@
-#include "stm32f4xx_hal.h"
+#include "tim.h"
 
 static const uint32_t fCK = 16000000U; // Clock speed of TIM
 
@@ -32,6 +32,13 @@ void TIM_Init_ms(TIM_TypeDef *port, uint16_t ms) {
     port->EGR |= (0b1U); // Generate update event
     port->SR &= ~(0b1U); // Clear UIF
 
+}
+
+void TIM_DelayMicros(TIM_TypeDef *port, uint32_t micros){
+    port->CNT = 0;
+    port->CR1 |= (0b1U);
+    while(port->CNT < micros) {}
+    port->CR1 &= ~(0b1U);
 }
 
 void TIM_Start(TIM_TypeDef *port) {
