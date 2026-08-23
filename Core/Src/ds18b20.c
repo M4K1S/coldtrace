@@ -21,8 +21,8 @@ uint8_t ds18b20_start_conversion(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeD
     return 1;
 }
 
-float ds18b20_read_temp(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port) {
-    if (!ds18b20_begin(gpio_port, pin, tim_port)) return -999; // Error case
+uint8_t ds18b20_read_temp(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port, float *temp_out) {
+    if (!ds18b20_begin(gpio_port, pin, tim_port)) return 0; // Error case
     // Send read scratchpad
     ow_write_byte(gpio_port, pin, tim_port, DS18B20_READ_SCRATCHPAD);
     // Read the first byte (LS byte)
@@ -32,6 +32,6 @@ float ds18b20_read_temp(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_p
     // Combine both bytes into a signed 16 bit value
     int16_t temp_byte = (ms_byte << 8) | ls_byte;
     // Divide by 16 to get actual temp in C
-    float temp = ((float)temp_byte) / 16;
-    return temp;
+    *temp_out = ((float)temp_byte) / 16;
+    return 1; // Success
 }

@@ -14,14 +14,13 @@ uint8_t ow_reset(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port) {
     // Release the line and let the pull-up bring it high
     GPIO_SetMode(gpio_port, pin, INPUT);
 
-    // Wait 70us (within the 15-60us DS18B20 response window, plus margin, then sample)
-    // This falls inside its 60-240us presence pulse
-    TIM_Delay_us(tim_port, 70);
+    // Wait 100us then sample.
+    TIM_Delay_us(tim_port, 100);
     uint8_t presence = !GPIO_Read(gpio_port, pin); // LOW = presence detected, so invert
 
     // Complete the remaining tRSTH (480us total high time) before returning,
     // so the bus is in a known idle state before the next operation begins
-    TIM_Delay_us(tim_port, 410); // 70 + 410 = 480us total since release
+    TIM_Delay_us(tim_port, 380); // 100 + 380 = 480us total since release
 
     return presence;
 }
@@ -40,6 +39,8 @@ void ow_write_bit(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port, u
         GPIO_SetMode(gpio_port, pin, OUTPUT);
         GPIO_Set(gpio_port, pin, 0);
         TIM_Delay_us(tim_port, 60);
+        // Release bus
+        GPIO_Set(gpio_port, pin, 1);
     }
 
     // Recovery time before next slot
@@ -56,7 +57,7 @@ uint8_t ow_read_bit(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port)
     // Wait 5us then sample
     TIM_Delay_us(tim_port, 5);
     uint8_t read_bit = GPIO_Read(gpio_port, pin);
-    // Wait remainder of slot (60ms + recovery time)
+    // Wait remainder of slot (60us + recovery time)
     TIM_Delay_us(tim_port, 55);
     return read_bit;
 }

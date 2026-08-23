@@ -1,13 +1,12 @@
+#include "i2c.h"
+
+#define I2C_TIMEOUT_US 5000U // 5ms timeout for I2C
+
 static const uint32_t fCK = 16000000U; // Clock speed of i2C
 static const uint32_t fastCK = 400000U;
 static const uint32_t standCK = 100000U;
 
-typedef enum {
-    SPEED_STANDARD,
-    SPEED_FAST
-} I2C_SPEED;
-
-void I2C_Init(I2C_TypeDef *port, I2C_SPEED speed){
+void I2C_Init(I2C_TypeDef *port, I2C_SPEED speed, TIM_TypeDef *tim_port){
     if (port == I2C1) {
         RCC->APB1ENR |= (0b1U << 21); // Start I2C1 Clock
         RCC->AHB1ENR |= (0b1U << 1);  // Start GPIOB Clock
@@ -36,8 +35,27 @@ void I2C_Init(I2C_TypeDef *port, I2C_SPEED speed){
     }
 
     port->CR1 |= (0b1U); // Set PE bit to 1 - enable I2C
+
+    TIM_Init(tim_port, 16, 65535); // configure 1MHz tick rate for I2C timeouts
 }
 
-void I2C_Start(I2C_TypeDef *port){
+uint8_t I2C_Start(I2C_TypeDef *port, TIM_TypeDef *tim_port) {
+    port->CR1 |= (0b1U << 8); // Set START bit
 
+    tim_port->CNT = 0;
+    tim_port->CR1 |= (0b1U); // start the timeout clock
+
+    while (!(port->SR1 & (0b1U << 0))) { // wait for SB flag
+        if (tim_port->CNT >= I2C_TIMEOUT_US) {
+            tim_port->CR1 &= ~(0b1U); // stop the timeout clock
+            return 0; // timed out
+        }
+    }
+
+    tim_port->CR1 &= ~(0b1U); // stop the timeout clock
+    return 1; // success
+}
+
+void I2C_Stop(I2C_TypeDef *port) {
+    port->CR1 |= (0b1U << 9); // Set STOP bit
 }
