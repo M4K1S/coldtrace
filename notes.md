@@ -121,71 +121,75 @@ CCRx = dutyCycle × 10
 
 ## I2C
 
-**Steps to initialize (I2C1, PB8=SCL/PB9=SDA example):**
-1. Enable I2C peripheral clock (`RCC_APB1ENR`) and GPIO clock
+I2C uses two shared, open-drain lines (SDA = data, SCL = clock) that any number of devices can sit on. No device can ever actively drive either line HIGH, only pull it LOW; an external pull-up resistor is what brings the line back HIGH whenever nothing is pulling it down. This is the same open-drain concept as GPIO's `OPEN_DRAIN` type, just required here because the bus is shared: if a device could drive HIGH, two devices disagreeing on the line's state would short-circuit each other. Open-drain means the worst case is just one device's LOW winning, never a conflict.
+
+One consequence worth knowing up front, since it explains a register later on: pulling LOW is fast (a transistor actively switching on), but rising back to HIGH is slower (passive charging of the wire's capacitance through the pull-up resistor). SDA and SCL only get read as valid data while SCL is HIGH; a START condition is SDA going HIGH→LOW *while SCL is HIGH* (a deliberate break from the normal rule that SDA only changes while SCL is LOW, which is exactly why it's recognizable as a special signal and not a data bit), and STOP is the reverse (LOW→HIGH while SCL is HIGH).
+
+### Setup (`I2C_Init`, I2C1 example, PB8=SCL/PB9=SDA)
+
+1. Enable the I2C peripheral clock (`RCC_APB1ENR`) and GPIO clock
 2. Configure SDA/SCL pins as alternate function, **AF4** (consistent across I2C1/2/3 on this chip)
-3. Set `OTYPER` to open-drain and `PUPDR` to pull-up on both pins (I2C requires this, no device can actively drive the bus HIGH, only pull it LOW; the pull-up passively returns it to HIGH). `OTYPER` is 1 bit/pin (0=push-pull, 1=open-drain); `PUPDR` is 2 bits/pin like `MODER` (`01`=pull-up)
-4. Set `CR2`'s `FREQ` bits (bits 5:0), tells the peripheral its own input clock speed, in MHz
-5. Set `CCR`, the actual bus-speed divider (see equation below), plus the `F/S` bit (bit 15: 0=Standard mode, 1=Fast mode)
-6. Set `TRISE`, max allowed SCL rise time, converted to clock cycles (see equation below)
-7. Set `CR1`'s `PE` bit **last**, the peripheral locks CCR/TRISE once enabled, so they must be configured first
+3. Set `OTYPER` to open-drain and `PUPDR` to pull-up on both pins, for the shared-bus reasons above. `OTYPER` is 1 bit/pin (0=push-pull, 1=open-drain); `PUPDR` is 2 bits/pin like `MODER` (`01`=pull-up)
+4. Set `CR2`'s `FREQ` bits (bits 5:0) to the peripheral's own input clock speed in MHz, this is just telling the hardware what clock it's running on, not the bus speed itself
+5. Set `CCR`, the actual SCL bus-speed divider, plus the `F/S` bit (bit 15: 0=Standard mode/100kHz, 1=Fast mode/400kHz). See the CCR equation below for how this value is calculated
+6. Set `TRISE`, the maximum time (in clock cycles) the peripheral will allow for that passive rise-to-HIGH to complete before it treats the line as having a fault. See the TRISE equation below
+7. Set `CR1`'s `PE` bit (Peripheral Enable) **last**, the peripheral locks `CCR`/`TRISE` once enabled, so they must be configured first
 
-**Why I2C needs open-drain + pull-ups:** SDA and SCL are shared, multi-device lines. If a device could actively drive HIGH, two devices disagreeing on the line's state would short-circuit each other. Open-drain means each device can only pull LOW (safe to share); pull-up resistors passively bring the line back to HIGH when nothing's pulling it down. This is also why pulling LOW is fast (active transistor) but rising to HIGH is slower (passive RC charging through the pull-up resistor), directly relevant to the CCR/TRISE timing math below.
+**One-time timeout timer setup, added inside `I2C_Init`:** also calls `TIM_Init(tim_port, 16, 65535)` to configure a dedicated timer at a 1MHz tick rate, used by every transaction function below for timeouts (see next section). Same one-time-setup pattern as `ow_init()`.
 
-**CCR (clock divider) equation, derivation:**
+### Transaction primitives (built on top of `I2C_Init`)
 
-The manual defines, for Standard mode:
-```
-Thigh = CCR × TPCLK1
-Tlow  = CCR × TPCLK1
-```
-where `TPCLK1` is the *period* of the peripheral clock (`TPCLK1 = 1 / fPCLK1`), not the frequency.
+Every function below that waits on the bus or an external device shares an identical timeout structure: reset the timeout timer's `CNT` to 0, start it, poll a status flag while checking `CNT` against `I2C_TIMEOUT_US` (`#define`'d as 5000, i.e. 5ms, applied uniformly rather than tuned per-function), stop the timer, return 1 (success) or 0 (timeout). This is required because a bare `while(!flag);` hangs the whole program forever if a device never ACKs, wiring is bad, or the bus is stuck.
 
-Total SCL period = Thigh + Tlow = `2 × CCR × TPCLK1`. SCL frequency is the reciprocal of that period:
-```
-fSCL = 1 / (2 × CCR × TPCLK1)
-```
-Solving for CCR, and substituting `TPCLK1 = 1/fPCLK1`:
+**`I2C_Start()`:** sets `CR1`'s `START` bit (bit 8) to generate a Start condition, polls `SR1`'s `SB` flag (bit 0) which the hardware sets once that condition has actually finished being generated on the bus. Hardware auto-clears `START` once done, no manual clear needed.
+
+**`I2C_Stop()`:** sets `CR1`'s `STOP` bit (bit 9). No flag to wait on since nothing downstream depends on the Stop condition completing before the code moves on; hardware auto-clears the bit once the Stop condition completes.
+
+**`I2C_SendAddress(addr, rw)`:** formats the address byte as `(addr << 1) | rw` (the 7-bit device address shifted up one, with the read/write bit in position 0; per I2C convention `rw=0` means write, `rw=1` means read), writes it to `DR`, then polls `SR1`'s `ADDR` flag (bit 1), which sets once the addressed device has acknowledged.
+
+Clearing `ADDR` requires a specific two-register read sequence, not a direct bit clear: **read `SR1`, then read `SR2`**, discarding both values with `(void)`. This isn't optional or just informational, it's the literal hardware mechanism that clears the flag; skipping either read leaves `ADDR` stuck set and corrupts whatever operation comes next. `SR2` itself holds additional transaction-state bits (`MSL`, `BUSY`, `TRA`) that aren't used here but are part of why the two-step sequence exists, the address-match event bundles "address sent" (SR1) together with "here's the resulting mode" (SR2), and the hardware wants both looked at before it lets the flag clear.
+
+**`I2C_WriteByte(byte)`:** writes to `DR`, polls `SR1`'s `TXE` flag (bit 7, "transmit register empty" = the peripheral has moved the last byte along and is ready for the next one to be loaded).
+
+**`I2C_ReadByte(ack, *byte_out)`:** polls `SR1`'s `RXNE` flag (bit 6, "receive register not empty" = a byte has fully arrived and is sitting in `DR`). The `ACK` bit (`CR1` bit 10) has to be set **before** the wait loop starts, not after, because the hardware auto-generates the ACK/NACK for a byte at the exact moment that byte finishes arriving, based on whatever `ACK` was set to at that instant. Setting it after `RXNE` fires is too late, that byte's ACK/NACK has already gone out. `ACK=1` tells the sender "keep going" (use for every byte except the last one in a multi-byte read); `ACK=0` tells it "stop" (use for the final byte).
+
+**Output-parameter pattern (`I2C_ReadByte`, and `ds18b20_read_temp` updated to match):** the return value is dedicated purely to success/failure (1/0); the actual data comes back through a pointer parameter (`*byte_out`, `*temp_out`) that the function writes into via the caller's address (`&variable`, i.e. `*ptr = value` follows the pointer to write directly into the caller's memory). This avoids the sentinel-value problem, a `uint8_t` byte has no value that's safely "impossible" to use as an error marker (unlike, say, `-999°C` for a temperature, which is outside any real range), since any of the 256 possible byte values could be genuinely valid data.
+
+### Higher-level (built on the primitives above)
+
+Every function below bails out to `I2C_Stop()` + `return 0` the moment any primitive call fails, rather than pressing on regardless, so a mid-transaction failure never gets reported as a success and never leaves the bus in an unknown state.
+
+**`I2C_WriteReg(dev_addr, reg_addr, value)`:** `Start → SendAddress(WRITE) → WriteByte(reg_addr) → WriteByte(value) → Stop`. The two data bytes aren't special to the I2C protocol itself, electrically they're just two ordinary bytes sent one after another; their meaning ("set register pointer" then "store this value there") comes entirely from how the receiving device's own internal logic is designed to interpret the byte immediately following its address, a convention most I2C peripheral chips follow, documented per-device in that device's own datasheet.
+
+**`I2C_ReadReg(dev_addr, reg_addr, *value_out)`:** needs a **repeated Start**, not a straight sequence, because reading requires two distinct phases: first tell the device which register you want (write phase: `Start → SendAddress(WRITE) → WriteByte(reg_addr)`), then actually receive it (read phase: `Start` again (repeated, no `Stop` in between) `→ SendAddress(READ) → ReadByte(NACK)`, NACK since it's the only/last byte). The repeated Start (rather than a full Stop + fresh Start) matters because a full Stop releases the bus, letting another device potentially interleave a transaction in the gap, a repeated Start keeps the whole write-then-read exchange atomic and uninterrupted. Electrically, a (repeated) Start is also the only defined mechanism for signaling "direction may now switch", there's no other way to tell a device "stop listening, start talking" without it, since something has to hand control of SDA from the master (driving it during write) to the device (driving it during read).
+
+**`I2C_WriteBytes(dev_addr, reg_addr, *data, len)`:** same shape as `WriteReg` but loops `WriteByte(data[i])` for `len` bytes after the register address, no repeated Start needed since the whole operation stays in write mode throughout.
+
+**`I2C_ReadBytes(dev_addr, reg_addr, *data, len)`:** same repeated-start shape as `ReadReg`, but loops `len` times, ACKing every byte except the last (which gets NACK'd). Needed over calling `ReadReg` `len` times in a loop for two reasons: efficiency (one `Start`/`Stop` cycle instead of `len` of them), and atomicity, for something like the DS3231's 7 time registers, `len` separate reads risk a value changing (e.g. seconds rolling over) between calls, giving a self-inconsistent time snapshot; one held-open burst read guarantees all 7 bytes reflect the same instant.
+
+**Caller must guarantee `data` points to a buffer of at least `len` bytes.** `uint8_t *data` carries no size information at runtime, C's type system can't and won't check this, a pointer to a single byte and a pointer to the first element of a 100-byte array look identical to the compiler. Passing a `len` larger than the actual buffer writes past its end (undefined behavior, a real and classic class of C bug), it's a contract enforced only by the caller matching the buffer's real allocated size to what's passed as `len`.
+
+### Equations
+
+**CCR (clock divider), derivation:**
+
+The manual defines, for Standard mode: `Thigh = CCR × TPCLK1`, `Tlow = CCR × TPCLK1`, where `TPCLK1` is the *period* of the peripheral clock (`TPCLK1 = 1 / fPCLK1`), not the frequency. Total SCL period = Thigh + Tlow = `2 × CCR × TPCLK1`, and SCL frequency is the reciprocal of that period: `fSCL = 1 / (2 × CCR × TPCLK1)`. Solving for CCR and substituting `TPCLK1 = 1/fPCLK1`:
 ```
 CCR = fPCLK1 / (2 × fSCL)      [Standard mode]
 ```
-Fast mode (DUTY=0) uses `Tlow = 2 × CCR × TPCLK1` instead of `1×`, making the total period `3 × CCR × TPCLK1`, giving:
+Fast mode (DUTY=0) uses `Tlow = 2 × CCR × TPCLK1` instead of `1×`, making the total period `3 × CCR × TPCLK1`:
 ```
 CCR = fPCLK1 / (3 × fSCL)      [Fast mode, DUTY=0]
 ```
+Worked example (fPCLK1 = 16MHz, Standard mode, fSCL = 100kHz): `CCR = 16,000,000 / (2 × 100,000) = 80`.
 
-**Worked example (fPCLK1 = 16MHz, Standard mode, fSCL = 100kHz):**
-```
-CCR = 16,000,000 / (2 × 100,000) = 16,000,000 / 200,000 = 80
-```
+**TRISE:**
 
-**TRISE equation:**
-
-Derived from the I2C bus spec's maximum allowed SCL rise time: 1000ns for Standard mode, 300ns for Fast mode (Fast mode's shorter clock period leaves less timing margin, so the allowed rise time is tighter).
+Derived from the I2C bus spec's maximum allowed SCL rise time: 1000ns for Standard mode, 300ns for Fast mode (Fast mode's shorter clock period leaves less timing margin, so the allowed rise time is tighter):
 ```
 TRISE = (fPCLK1 × maxRiseTime) + 1
 ```
-Standard mode (1000ns), simplifies to just FREQ in MHz + 1.
-
----
-
-## I2C transaction primitives (built on I2C_Init)
-
-All timeout-capable functions below share the identical structure: reset the timeout timer's `CNT` to 0, start it, poll a status flag while checking `CNT` against `I2C_TIMEOUT_US` (5000, i.e. 5ms, applied uniformly rather than tuned per-function), stop the timer, return 1 (success) or 0 (timeout). Every I2C function that waits on an external device or the peripheral's internal state machine needs this, since a bare `while(!flag);` hangs forever if a device doesn't ACK.
-
-**`I2C_Start()`:** sets `CR1`'s `START` bit (bit 8), polls `SR1`'s `SB` flag (bit 0). Hardware auto-clears `START` once the Start condition is generated, no manual clear needed.
-
-**`I2C_Stop()`:** sets `CR1`'s `STOP` bit (bit 9). No flag to wait on, hardware auto-clears it once the Stop condition completes.
-
-**`I2C_SendAddress(addr, rw)`:** formats the address byte as `(addr << 1) | rw` (7-bit address shifted up, R/W bit in position 0; per I2C convention `rw=0` is write, `rw=1` is read), writes it to `DR`, polls `SR1`'s `ADDR` flag (bit 1).
-
-**Clearing `ADDR` requires a specific two-register read sequence, not a direct bit clear:** read `SR1` then read `SR2`, discarding both values with `(void)`. This isn't optional or just informational, it's the literal hardware mechanism that clears the flag, skipping either read leaves `ADDR` stuck set and corrupts the next operation. `SR2` itself holds additional transaction-state bits (`MSL`, `BUSY`, `TRA`) that aren't used here but are part of why the two-step sequence exists.
-
-**`I2C_WriteByte(byte)`:** writes to `DR`, polls `SR1`'s `TXE` flag (bit 7, "transmit register empty" = ready for the next byte to send).
-
-**`I2C_ReadByte(ack, *byte_out)`:** polls `SR1`'s `RXNE` flag (bit 6, "receive register not empty" = a byte has arrived). The `ACK` bit (`CR1` bit 10) must be set **before** the wait loop, not after, because the hardware auto-generates the ACK/NACK for a byte at the moment that byte finishes arriving, based on whatever `ACK` was set to at that moment. Setting it after `RXNE` fires is too late, that byte's ACK/NACK has already been sent. `ACK=1` tells the sender "keep going" (use for all but the last byte of a multi-byte read); `ACK=0` tells it "stop" (use for the final byte).
-
-**Output-parameter pattern for functions returning data (`I2C_ReadByte`, and `ds18b20_read_temp` updated to match):** return value is dedicated purely to success/failure (1/0), actual data comes back through a pointer parameter (`*byte_out`, `*temp_out`) that the function writes into via the caller's address (`&variable`). This avoids the sentinel-value problem, a `uint8_t` byte has no value that's safely "impossible" to use as an error marker (unlike, say, `-999°C` for a temperature), since any of the 256 possible byte values could be genuinely valid data.
+Standard mode (1000ns) simplifies to just FREQ in MHz + 1.
 
 ---
 
