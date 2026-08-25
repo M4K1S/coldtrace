@@ -169,6 +169,41 @@ Every function below bails out to `I2C_Stop()` + `return 0` the moment any primi
 
 **Caller must guarantee `data` points to a buffer of at least `len` bytes.** `uint8_t *data` carries no size information at runtime, C's type system can't and won't check this, a pointer to a single byte and a pointer to the first element of a 100-byte array look identical to the compiler. Passing a `len` larger than the actual buffer writes past its end (undefined behavior, a real and classic class of C bug), it's a contract enforced only by the caller matching the buffer's real allocated size to what's passed as `len`.
 
+---
+
+## DS3231 (RTC, device-specific layer built on I2C)
+
+Address `0x68`, confirmed directly from the datasheet ("the 7-bit DS3231 address, which is 1101000").
+
+**Why register auto-increment isn't an I2C feature, it's chip-specific:** I2C itself has no concept of "registers", it just moves raw bytes. The DS3231's own internal logic is what interprets the first byte after its address as "set my internal register pointer here", and increments that pointer itself after every subsequent byte transferred (confirmed in the datasheet: "This sets the register pointer... The register pointer increments after each data byte is transferred"). This is a convention this specific chip was designed to follow, not something the I2C protocol or your STM32 peripheral guarantees, different I2C devices can and do behave differently, always check the specific device's datasheet.
+
+**Time/date registers (`0x00`-`0x06`) are stored in BCD**, not plain binary, confirmed directly in the datasheet. BCD packs each individual decimal digit into its own 4-bit nibble (upper nibble = tens digit, lower nibble = ones digit) rather than converting the whole number into one combined binary value, e.g. decimal 47 as BCD is `0100 0111` (`0x47`), completely different bits from plain-binary 47 (`00101111`). Historically chosen because it let old RTC/calculator hardware drive 7-segment displays directly from the raw register bits with zero binary-to-decimal conversion circuitry needed, one nibble maps straight to one digit. Largely legacy baggage on a modern microcontroller-based project like this one, doesn't buy anything a plain binary register wouldn't, it's just what this chip's convention already is.
+
+**`bcd_to_dec(bcd)` / `dec_to_bcd(dec)`:** the translation layer between "how the chip stores a value" (BCD) and "how the rest of the code wants to use it" (plain decimal), same shift-and-mask technique used throughout this whole project:
+```c
+uint8_t tens = bcd >> 4;        // upper nibble
+uint8_t ones = bcd & 0b1111U;   // lower nibble, masked
+uint8_t dec = tens * 10 + ones;
+```
+and the reverse:
+```c
+uint8_t tens = dec / 10;   // integer division
+uint8_t ones = dec % 10;   // remainder
+uint8_t bcd = (tens << 4) | ones;
+```
+
+**Hours register (`0x02`) is the one exception to pure BCD**, per the datasheet's register map: bit 7 is unused (always 0), bit 6 is a 12/24-hour mode select, and bit 5 means different things depending on that mode (AM/PM in 12-hour mode, or the "20-hour" flag in 24-hour mode). This project always uses 24-hour mode, so bit 5 is genuinely part of the encoded hour value (needed to represent hours 20-23, since the BCD tens digit alone can't exceed what 2 bits allow) and must be kept, only bits 6 and 7 get masked off before running the byte through `bcd_to_dec()`:
+```c
+time->hours = bcd_to_dec(buffer[2] & 0b00111111U);
+```
+No equivalent masking is needed on the write side (`dec_to_bcd()` on any hour 0-23 never sets bit 6 or 7 in the first place, so 24-hour mode is preserved automatically).
+
+**`rtc_get_time(*time)`:** one `I2C_ReadBytes()` burst call starting at register `0x00` for 7 bytes (relying on the chip's auto-increment to walk seconds through year in one atomic transaction), then each byte through `bcd_to_dec()` (masked for hours) into the matching `RTC_Time` struct field via the pointer (`time->field = ...`, arrow operator since `time` is a pointer to the struct, not the struct itself).
+
+**`rtc_set_time(*time)`:** the mirror operation, each struct field through `dec_to_bcd()` into a local `buffer[7]`, then one `I2C_WriteBytes()` burst call to push all 7 at once. Per the datasheet, writing all 7 registers within the same burst (rather than 7 separate writes) matters because "the countdown chain is reset whenever the seconds register is written... the remaining time and date registers must be written within 1 second" to avoid rollover inconsistencies, a single held-open transaction guarantees this automatically.
+
+**Why a burst read/write instead of 7 separate `ReadReg`/`WriteReg` calls:** efficiency (one Start/Stop cycle instead of seven), and atomicity, separate reads risk a value changing (e.g. seconds rolling over) between calls, giving a self-inconsistent time snapshot. The datasheet confirms the chip is explicitly designed around this: reads are synchronized to a secondary buffer on every I2C START specifically so a multi-byte burst read is guaranteed self-consistent even if the internal clock ticks over mid-read.
+
 ### Equations
 
 **CCR (clock divider), derivation:**
