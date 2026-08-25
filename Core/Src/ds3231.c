@@ -27,6 +27,19 @@ uint8_t rtc_set_time(I2C_TypeDef *port, TIM_TypeDef *tim_port, RTC_Time *time) {
     if(!I2C_WriteBytes(port, tim_port, DS3231_ADDR, 0x00, buffer, 7)){
         return 0;
     }
+
+    // Writing the time registers does NOT clear OSF on its own -- per the
+    // datasheet it's only cleared by an explicit write, so do that now that
+    // we've just given the RTC a known-good time.
+    uint8_t status;
+    if (!I2C_ReadReg(port, tim_port, DS3231_ADDR, DS3231_REG_STATUS, &status)) {
+        return 0;
+    }
+    status &= ~DS3231_OSF_BIT;
+    if (!I2C_WriteReg(port, tim_port, DS3231_ADDR, DS3231_REG_STATUS, status)) {
+        return 0;
+    }
+
     return 1;
 }
 
@@ -47,4 +60,13 @@ uint8_t rtc_get_time(I2C_TypeDef *port, TIM_TypeDef *tim_port, RTC_Time *time) {
         time->year    = bcd_to_dec(buffer[6]);
 
         return 1;
+}
+
+// Returns 0 if the RTC's time is not trustworthy
+uint8_t rtc_time_is_valid(I2C_TypeDef *port, TIM_TypeDef *tim_port) {
+    uint8_t status;
+    if (!I2C_ReadReg(port, tim_port, DS3231_ADDR, DS3231_REG_STATUS, &status)) {
+        return 0;
+    }
+    return (status & DS3231_OSF_BIT) == 0;
 }

@@ -3,6 +3,7 @@
 void ow_init(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port) {
     GPIO_Init(gpio_port, pin, OUTPUT, OPEN_DRAIN); // open-drain setup
     TIM_Init(tim_port, 16, 65535); // configure 1MHz tick rate
+    GPIO_Set(gpio_port, pin, 1);  // release the line, let it idle HIGH
 }
 
 uint8_t ow_reset(GPIO_TypeDef *gpio_port, uint8_t pin, TIM_TypeDef *tim_port) {

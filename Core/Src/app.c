@@ -2,19 +2,19 @@
 #include <stdint.h>
 #include "uart.h"
 #include "ds18b20.h"
+#include "ds3231.h"
 
 // DS18B20 data line + the timer dedicated to OneWire's microsecond delays
 #define TEMP_PORT GPIOA
 #define TEMP_PIN  10
 #define TEMP_TIM  TIM2
 
-// TIM_Delay_us can't span more than one timer period (ARR = 65535 @ 1MHz tick,
-// so ~65ms max per call) — chain calls to build longer waits.
-static void delay_ms(TIM_TypeDef *tim_port, uint32_t ms) {
-    for (uint32_t i = 0; i < ms; i++) {
-        TIM_Delay_us(tim_port, 1000);
-    }
-}
+// DS3231 is on I2C1 (PB8=SCL, PB9=SDA)
+#define RTC_I2C   I2C1
+#define RTC_TIM   TIM3
+
+// Dedicated timer for app-level loop pacing
+#define DELAY_TIM TIM4
 
 // Prints a signed float with 2 decimal places, no libc float-printf dependency
 static void UART_SendTemp(USART_TypeDef *port, float tempC) {
@@ -46,31 +46,101 @@ static void UART_SendTemp(USART_TypeDef *port, float tempC) {
     UART_SendChar(port, '0' + (frac % 10));
 }
 
+static void UART_SendTwoDigit(USART_TypeDef *port, uint8_t val) {
+    UART_SendChar(port, '0' + (val / 10) % 10);
+    UART_SendChar(port, '0' + (val % 10));
+}
+
+static uint8_t parse_two_digits(const char *s) {
+    return (uint8_t)((s[0] - '0') * 10 + (s[1] - '0'));
+}
+
+// Blocks on UART RX until the user types a valid 13-digit time string and
+// presses Enter, then writes it to the DS3231. Format: YYMMDDHHMMSSD
+// (D = day of week, 1-7). Reprompts on a bad-length line.
+static void set_time_from_uart(void) {
+    UART_SendString(USART2, "RTC time not set. Enter time as YYMMDDHHMMSSD (D=day 1-7), then Enter:\r\n");
+
+    char buf[13];
+    uint8_t idx = 0;
+
+    while (1) {
+        char c = UART_ReceiveChar(USART2); // blocks until a char arrives
+        if (c == '\r' || c == '\n') {
+            if (idx == 13) break;
+            UART_SendString(USART2, "\r\nExpected 13 digits, try again:\r\n");
+            idx = 0;
+            continue;
+        }
+        if (c >= '0' && c <= '9' && idx < 13) {
+            buf[idx++] = c;
+            UART_SendChar(USART2, c); // echo
+        }
+    }
+    UART_SendString(USART2, "\r\n");
+
+    RTC_Time time;
+    time.year    = parse_two_digits(&buf[0]);
+    time.month   = parse_two_digits(&buf[2]);
+    time.date    = parse_two_digits(&buf[4]);
+    time.hours   = parse_two_digits(&buf[6]);
+    time.minutes = parse_two_digits(&buf[8]);
+    time.seconds = parse_two_digits(&buf[10]);
+    time.day     = (uint8_t)(buf[12] - '0');
+
+    if (rtc_set_time(RTC_I2C, RTC_TIM, &time)) {
+        UART_SendString(USART2, "RTC time set.\r\n");
+    } else {
+        UART_SendString(USART2, "RTC set failed (I2C timeout) - check DS3231 wiring.\r\n");
+    }
+}
+
 void App_Init(void)
 {
     UART_Init(USART2, 115200);
     ow_init(TEMP_PORT, TEMP_PIN, TEMP_TIM);
+    I2C_Init(RTC_I2C, SPEED_STANDARD, RTC_TIM);
+    TIM_Init(DELAY_TIM, 16, 65535); // 1MHz tick for TIM_Delay_us/ms
+
+    if (!rtc_time_is_valid(RTC_I2C, RTC_TIM)) {
+        set_time_from_uart();
+    }
 }
 
 void App_Loop(void)
 {
+    RTC_Time time;
+    uint8_t have_time = rtc_get_time(RTC_I2C, RTC_TIM, &time);
+
+    if (have_time) {
+        UART_SendTwoDigit(USART2, time.hours);
+        UART_SendChar(USART2, ':');
+        UART_SendTwoDigit(USART2, time.minutes);
+        UART_SendChar(USART2, ':');
+        UART_SendTwoDigit(USART2, time.seconds);
+        UART_SendString(USART2, "  ");
+    } else {
+        UART_SendString(USART2, "RTC read failed  ");
+    }
+
     if (!ds18b20_start_conversion(TEMP_PORT, TEMP_PIN, TEMP_TIM)) {
         UART_SendString(USART2, "DS18B20 not found\r\n");
-        delay_ms(TEMP_TIM, 1000);
+        TIM_Delay_ms(DELAY_TIM, 1000);
         return;
     }
 
-    delay_ms(TEMP_TIM, 750); // tCONV max for 12-bit resolution
+    TIM_Delay_ms(DELAY_TIM, 750); // tCONV max for 12-bit resolution
 
     float tempC;
     if (!ds18b20_read_temp(TEMP_PORT, TEMP_PIN, TEMP_TIM, &tempC)) {
         UART_SendString(USART2, "DS18B20 read failed\r\n");
-        delay_ms(TEMP_TIM, 1000);
+        TIM_Delay_ms(DELAY_TIM, 250);
         return;
     }
+
     UART_SendString(USART2, "Temp: ");
     UART_SendTemp(USART2, tempC);
     UART_SendString(USART2, " C\r\n");
 
-    delay_ms(TEMP_TIM, 1000);
+    TIM_Delay_ms(DELAY_TIM, 250); // ~1s total loop period including the 750ms conversion wait
 }

@@ -7,6 +7,8 @@
 #include "tim.h"
 
 #define DS3231_ADDR 0x68
+#define DS3231_REG_STATUS 0x0F
+#define DS3231_OSF_BIT (1U << 7) // Oscillator Stop Flag - set if power/battery was lost
 
 typedef struct {
     uint8_t seconds;
@@ -23,5 +25,6 @@ uint8_t dec_to_bcd(uint8_t dec);
 
 uint8_t rtc_set_time(I2C_TypeDef *port, TIM_TypeDef *tim_port, RTC_Time *time);
 uint8_t rtc_get_time(I2C_TypeDef *port, TIM_TypeDef *tim_port, RTC_Time *time);
+uint8_t rtc_time_is_valid(I2C_TypeDef *port, TIM_TypeDef *tim_port);
 
 #endif
