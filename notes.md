@@ -204,6 +204,16 @@ No equivalent masking is needed on the write side (`dec_to_bcd()` on any hour 0-
 
 **Why a burst read/write instead of 7 separate `ReadReg`/`WriteReg` calls:** efficiency (one Start/Stop cycle instead of seven), and atomicity, separate reads risk a value changing (e.g. seconds rolling over) between calls, giving a self-inconsistent time snapshot. The datasheet confirms the chip is explicitly designed around this: reads are synchronized to a secondary buffer on every I2C START specifically so a multi-byte burst read is guaranteed self-consistent even if the internal clock ticks over mid-read.
 
+**`rtc_time_is_valid(port, tim_port)`:** checks whether the chip's own clock has been running continuously, before trusting any time it reports. Reads the Status register (`0x0F`) and checks bit 7, the **Oscillator Stop Flag (OSF)** — the chip sets this bit itself, in hardware, whenever its internal oscillator has stopped and restarted, which happens specifically when it loses both main power and backup battery power at the same time (dead/missing coin cell, or a fresh chip that's never been set). This is a better signal to check than inspecting the time values themselves, a reset RTC can land on a plausible-looking but wrong time (e.g. midnight, Jan 1) that would pass a naive sanity-range check while still being meaningless, OSF is the chip's own explicit "don't trust me" flag rather than something inferred after the fact.
+```c
+uint8_t status;
+if (!I2C_ReadReg(port, tim_port, DS3231_ADDR, DS3231_REG_STATUS, &status)) {
+    return 0; // can't talk to the chip at all, treat as untrustworthy
+}
+return (status & DS3231_OSF_BIT) == 0; // true only if OSF is clear
+```
+`status & DS3231_OSF_BIT` masks out every bit except bit 7 (same shift-and-mask pattern used throughout this project), giving `0x80` if the flag is set or `0` if it's clear. The explicit `== 0` turns that into a clean `1`/`0` rather than returning the raw `0x80`, which would happen to still work in an `if` check (non-zero is truthy) but is a confusing value to return given the function's own success/fail convention elsewhere. The return is also intentionally inverted from the raw flag (`1` = valid = OSF *not* set), so the function reads naturally at the call site ("is the time valid") rather than making every caller remember to negate the raw hardware flag themselves. Used in `App_Init()` to conditionally prompt for a time-set over UART only when actually needed, instead of every boot.
+
 ### Equations
 
 **CCR (clock divider), derivation:**
@@ -313,6 +323,8 @@ static uint8_t ds18b20_begin(...) {
 
 **`ds18b20_start_conversion()`:** `ds18b20_begin()`, then `ow_write_byte(DS18B20_CONVERT_T)`. Doesn't wait for or read the result, just triggers it, the sensor needs up to 750ms (`tCONV` at default 12-bit resolution) afterward before a read will return valid data.
 
+**`tCONV` (conversion time) depends on resolution, which the app layer must wait out between triggering and reading.** The DS18B20 supports 9/10/11/12-bit resolution, higher resolution means finer temperature steps (12-bit gives the full `0.0625°C` step size worked out earlier) but takes longer to measure: roughly 93.75ms / 187.5ms / 375ms / 750ms max respectively. The driver never explicitly sets a resolution, so the sensor defaults to 12-bit on power-up, hence the 750ms wait in `app.c` between `ds18b20_start_conversion()` and `ds18b20_read_temp()`. Reading before the conversion finishes returns stale or garbage data, commonly the chip's power-on default of 85°C rather than a real measurement.
+
 **`ds18b20_read_temp()`:** `ds18b20_begin()`, then `ow_write_byte(DS18B20_READ_SCRATCHPAD)`, then `ow_read_byte()` twice for the temperature register's LS byte (scratchpad Byte 0) and MS byte (Byte 1).
 
 **Temperature register format:** 16-bit two's complement, LS byte holds bits 2³ down to 2⁻⁴ (4 whole-number bits, 4 fractional bits), MS byte holds 5 sign bits plus bits 2⁶-2⁴. Since the smallest bit is 2⁻⁴ = 1/16, the whole 16-bit value scaled by 1/16 gives the temperature directly:
@@ -321,3 +333,66 @@ int16_t temp_byte = (ms_byte << 8) | ls_byte;   // int16_t, not uint16_t, so neg
 float temp = ((float)temp_byte) / 16.0f;
 ```
 Verified against the datasheet's own worked examples (e.g. `0191h` = 401 decimal, `401/16 = 25.0625°C`, matching the table exactly; `FFF8h` as signed int16 = -8, `-8/16 = -0.5°C`, also matching).
+
+---
+
+## SPI
+
+Full-duplex, point-to-point (with a per-device Chip Select line, not addressing like I2C). Simpler at the peripheral/register level than I2C, on purpose: no device addressing protocol, no ACK/NACK concept, no repeated-start/direction-switch complexity, only one status register (`SR`) instead of two (`SR1`/`SR2`). The real protocol complexity for something like an SD card lives one layer up, in the SD-specific command/response scheme built on top of SPI, not in SPI itself.
+
+**Setup (`SPI_Init`, SPI1 on PA5/PA6/PA7 example):**
+1. Enable the SPI peripheral clock and GPIO clock
+2. Configure SCK/MISO/MOSI pins as alternate function (AF5 for SPI1 on these pins)
+3. Configure `CR1`: `MSTR` (bit 2, master mode), baud rate prescaler (bits 5:3, `BR`), leave `CPOL`/`CPHA` at 0 (SPI Mode 0, what SD cards in SPI mode expect), leave 8-bit frame format (default)
+4. Set `SPE` (bit 6, peripheral enable) **last**, same "enable after everything else is configured" pattern as I2C's `PE`
+5. Also calls `TIM_Init(tim_port, 16, 65535)`, same one-time timeout-timer setup pattern as `I2C_Init`/`ow_init`
+
+**Baud rate:** a simple prescaler (÷2 through ÷256, powers of 2) dividing the peripheral clock, not a target-frequency calculation like I2C's CCR. At 16MHz: ÷2=8MHz down to ÷256=62.5kHz. SD card initialization specifically requires ≤400kHz (a slow prescaler, e.g. ÷64=250kHz); normal block read/write can go faster once initialized.
+
+**`SPI_TransferByte(byte_in, *byte_out)`:** every SPI transfer is simultaneously send-and-receive (full-duplex, no way to opt out of either direction), so one function does both, unlike I2C's separate `WriteByte`/`ReadByte`. Polls `TXE` (bit 1 of `SR`) before writing to `DR`, then `RXNE` (bit 0) before reading `DR` back. Uses the same `tim_port`-based timeout pattern as I2C, mainly as a defensive check against a software misconfiguration (SPI never enabled, wrong port) rather than an external-device failure mode, since a correctly-initialized SPI transfer is deterministic and can't really "not respond" the way an unaddressed/unresponsive I2C device can.
+
+**Chip Select (CS):** a plain GPIO output pin, not part of the SPI peripheral itself, driven with `GPIO_Set()`. Active-low by convention. Whether a given function handles CS internally (select, transact, deselect, all inside one call) or leaves it to the caller is a per-function design choice, not something SPI enforces, this project chose "handled internally" as the default, with the SD block read/write functions as a deliberate exception (see below) since they need CS held across multiple phases (command, then data) that can't be split into two separate `sd_send_command()`-style calls.
+
+---
+
+## SD card over SPI (device-specific layer, built on SPI)
+
+The WeAct core board used for this project has an onboard MicroSD slot, but it's wired to **SDIO** (`CMD`, `CLK`, `DAT0-3` pins), a different, more complex peripheral (command/response state machine, typically DMA-driven) than SPI. Deliberately not used for v1, not worth the schedule risk of learning a second, bigger protocol before the pilot deadline. A separate SPI SD breakout is wired to different pins instead; the onboard SDIO pins are simply left unused. Logged as a v2 upgrade.
+
+**The SD card has its own command/response language layered on top of SPI.** SPI is just the wire protocol (how bits move); the SD card's controller chip expects a specific, structured sequence of commands and replies in a particular format, defined by the SD Association's Physical Layer Specification (a spec that's traditionally hard to access publicly, unlike the DS18B20/DS3231 datasheets, community references like elm-chan.org's "How to Use MMC/SDC" and rjhcoding.com's AVR SD tutorial series were used to cross-check values instead).
+
+**Command frame format — every command is a fixed 6-byte frame:**
+```
+Byte 0:   0x40 | cmd_number   (bit7=0 start bit, bit6=1 transmission bit, bits5:0=command number)
+Byte 1-4: 32-bit argument, MSB first
+Byte 5:   CRC7 (7 bits) + stop bit (bit 0, always 1)
+```
+CRC is only actually *checked* by the card for CMD0 and CMD8 in SPI mode; since those two commands always use the same fixed argument in this driver, their correct CRC7 output is also always the same fixed value, so it's hardcoded (`0x95` for CMD0, `0x87` for CMD8) rather than computed at runtime. Every other command uses a dummy CRC byte (`0x01`, satisfying only the required stop bit) since CRC checking is off for them by default in SPI mode.
+
+**Response formats — "R" + a number is just a label for a response's byte-length and meaning, not a different mechanism.** Every response arrives the same way electrically (keep clocking dummy `0xFF` bytes and reading MISO until a valid byte shows up, or give up after some max tries), the R-number just tells you in advance how many bytes to expect and how to interpret them.
+- **R1** (1 byte): a set of error-flag bits. Bit 7 always 0 (this is what distinguishes a real response from line-idle `0xFF`, where bit 7 is 1). Bit 0 = "still in idle state." Used by CMD0, CMD55, ACMD41.
+- **R7** (R1 + 4 more bytes): used by CMD8. The trailing bytes carry the voltage-acceptance flag and an echo of the check pattern sent in the command.
+- **R3** (same shape as R7, 1+4 bytes): used by CMD58. The trailing bytes are the OCR (Operating Conditions Register), not the same information as R7's despite the identical byte count.
+
+**`sd_send_command()` handles both R1-only and R3/R7-shaped commands** via a `has_extra` flag and an output buffer, rather than two separate near-duplicate functions:
+1. Select CS (low)
+2. Send the 6-byte frame
+3. Poll for R1 (up to `SD_RESPONSE_TIMEOUT_TRIES`, checking bit 7 clear), starting `response` at `0xFF` since that value is otherwise impossible for a real response (bit 7 must be 0) and so doubles as a safe "nothing received yet" sentinel
+4. If `has_extra`, read 4 more bytes into the caller's buffer, **before** releasing CS (this is why R3/R7 handling can't be bolted onto `sd_send_command()`'s CS-release timing after the fact, the card would already be deselected)
+5. Deselect CS (high), return the R1 byte
+
+**Init sequence (`sd_init`), each step's purpose:**
+1. **≥74 dummy clock pulses**, CS high, MOSI high (`0xFF` × 10 bytes ≈ 80 clocks) — lets the card's internal power supply stabilize before any real command; a documented SD-spec requirement, not optional
+2. **CMD0** (GO_IDLE_STATE, arg=0): hard reset. Also what forces the card out of its native SDIO-style protocol into SPI mode, sending it while CS is low is specifically what triggers that switch. Expect R1=`0x01`
+3. **CMD8** (SEND_IF_COND, arg=`0x000001AA`): asks "what voltage do you support" and, implicitly, "do you even understand this command" — CMD8 postdates SD 1.x, so an old card/MMC card simply won't recognize it, making it a de facto version-detection mechanism. The low byte of the argument (`0xAA`) is an arbitrary check pattern the card must echo back exactly in its response, confirming the exchange genuinely worked rather than trusting a coincidentally-valid-looking reply. Only SD 2.0+ cards are handled by this driver (rejection on CMD8 = bail out)
+4. **CMD55 + CMD41 (as "ACMD41"), looped:** CMD55 is a required "the next command is application-specific" flag, sent immediately before every single ACMD, every time, it is not remembered across commands. ACMD41's argument sets bit 30 (HCS, Host Capacity Support) telling the card the host can handle SDHC/SDXC media. The card's real initialization is a physical process taking variable time, so this pair is resent in a loop until the response goes from `0x01` (still busy) to `0x00` (ready)
+5. **CMD58** (READ_OCR, arg=0), sent only after the ACMD41 loop succeeds (the OCR's capacity info isn't meaningful before that): reads the OCR register. Bit 30 of the OCR (bit 6 of the first response byte) is CCS (Card Capacity Status), 0=SDSC (byte-addressed), 1=SDHC/SDXC (block-addressed, fixed 512-byte blocks). This determines how `sd_read_block()`/`sd_write_block()` addresses need to be calculated later, output via the `is_sdhc` pointer parameter
+
+**Block read (`sd_read_block`, CMD17) and write (`sd_write_block`, CMD24):** unlike `sd_send_command()`, these can't release CS after the R1 response, since the actual 512-byte data phase still needs to happen with the card selected — so they inline their own copy of the 6-byte command-frame-sending logic rather than reusing `sd_send_command()`, a deliberate, necessary exception to reuse given the CS-timing requirement.
+
+Read sequence: send CMD17 frame → poll R1 (expect `0x00`) → poll for the **data start token** (`0xFE`, sent by the card once it's actually retrieved the data from flash, needs many more retries than a command response, `SD_DATA_TIMEOUT_TRIES`=500 rather than the 8 used for NCR, since the card is doing real physical flash-read work in the meantime) → read 512 bytes into the caller's buffer → read and discard 2 trailing CRC bytes → deselect CS.
+
+Write sequence: send CMD24 frame → poll R1 → send the data start token yourself (`0xFE`, reversed from the read case, now the host signals "here comes the data") → send 512 bytes from the caller's buffer → send 2 dummy CRC bytes → poll for the **data response token**, masking the low 5 bits (`SD_DATA_ACCEPTED_MASK = 0x1F`) and comparing against `SD_DATA_ACCEPTED_VALUE = 0x05` (a non-match, including the line-idle `0xFF` case, correctly keeps the poll loop going rather than false-accepting) → then a **separate** busy-wait: after accepting the data, the card needs real time to physically commit it to flash, holding the SPI line at `0x00` the whole time; keep clocking `0xFF` until a non-zero byte comes back, using a `finished` flag checked after the loop so a write that never actually completes is correctly reported as a failure rather than being silently claimed as a success just because the loop's fixed iteration count ran out.
+
+Both explicitly track success/failure through every phase (command rejected, data/token timeout, busy-wait timeout) and always deselect CS before returning on any path, mirroring the same "bail out and clean up, never leave the bus/line in an unknown state" discipline used throughout the I2C driver's higher-level functions.
+
