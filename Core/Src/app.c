@@ -3,6 +3,9 @@
 #include "uart.h"
 #include "ds18b20.h"
 #include "ds3231.h"
+#include "spi.h"
+#include "sd.h"
+#include "log.h"
 
 // DS18B20 data line + the timer dedicated to OneWire's microsecond delays
 #define TEMP_PORT GPIOA
@@ -15,6 +18,16 @@
 
 // Dedicated timer for app-level loop pacing
 #define DELAY_TIM TIM4
+
+// SD card over SPI1 (PA5=SCK, PA6=MISO, PA7=MOSI), CS is a plain GPIO
+#define SD_SPI     SPI1
+#define SD_TIM     TIM5
+#define SD_CS_PORT GPIOA
+#define SD_CS_PIN  4
+
+// Set once in App_Init if the SD card + log layer both came up cleanly;
+// App_Loop checks this before every log_append_reading() call
+static uint8_t sd_logging_ready = 0;
 
 // Prints a signed float with 2 decimal places, no libc float-printf dependency
 static void UART_SendTemp(USART_TypeDef *port, float tempC) {
@@ -105,6 +118,33 @@ void App_Init(void)
     if (!rtc_time_is_valid(RTC_I2C, RTC_TIM)) {
         set_time_from_uart();
     }
+
+    // CS starts deselected (HIGH) before anything touches the SD card
+    GPIO_Init(SD_CS_PORT, SD_CS_PIN, OUTPUT, PUSH_PULL);
+    GPIO_Set(SD_CS_PORT, SD_CS_PIN, 1);
+
+    // SD spec requires <=400kHz during card identification - SPI_PRESCALER_64
+    // at 16MHz gives 250kHz
+    SPI_Init(SD_SPI, SPI_PRESCALER_64, SD_TIM);
+
+    uint8_t is_sdhc;
+    if (!sd_init(SD_SPI, SD_TIM, SD_CS_PORT, SD_CS_PIN, &is_sdhc)) {
+        UART_SendString(USART2, "SD card not found - logging disabled.\r\n");
+        return;
+    }
+
+    // Card is identified now, safe to run SPI at full speed (~8MHz) for block I/O
+    SPI_Init(SD_SPI, SPI_PRESCALER_2, SD_TIM);
+
+    if (!log_init(SD_SPI, SD_TIM, SD_CS_PORT, SD_CS_PIN)) {
+        UART_SendString(USART2, "SD card found but log_init failed - logging disabled.\r\n");
+        return;
+    }
+
+    sd_logging_ready = 1;
+    UART_SendString(USART2, "SD card ready, logging enabled. is_sdhc=");
+    UART_SendChar(USART2, '0' + is_sdhc);
+    UART_SendString(USART2, "\r\n");
 }
 
 void App_Loop(void)
@@ -141,6 +181,20 @@ void App_Loop(void)
     UART_SendString(USART2, "Temp: ");
     UART_SendTemp(USART2, tempC);
     UART_SendString(USART2, " C\r\n");
+
+    // Log this reading to the SD card alongside the UART printout, if the
+    // card came up in App_Init() and we actually have a timestamp for it
+    if (sd_logging_ready && have_time) {
+        // Seconds since midnight - not a real epoch, just enough to order
+        // readings within a day. Swap for a proper timestamp if the date
+        // fields ever need to leave the RTC struct.
+        uint32_t timestamp = (uint32_t)time.hours * 3600U + (uint32_t)time.minutes * 60U + time.seconds;
+        uint8_t door_state = 0; // no door sensor wired up yet
+
+        if (!log_append_reading(SD_SPI, SD_TIM, SD_CS_PORT, SD_CS_PIN, tempC, timestamp, door_state)) {
+            UART_SendString(USART2, "SD log write failed\r\n");
+        }
+    }
 
     TIM_Delay_ms(DELAY_TIM, 250); // ~1s total loop period including the 750ms conversion wait
 }

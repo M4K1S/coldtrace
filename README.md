@@ -48,16 +48,18 @@ Supports USART1/2/3, UART4/5, USART6. 8N1 only, no flow control.
 
 ### SPI (`spi.c/h`) — done
 `SPI_Init`, `SPI_TransferByte`. SPI1 (PA5/6/7), Mode 0, 8-bit frames, selectable prescaler (÷2-÷256). Timeout-guarded (`SPI_TIMEOUT_US`, was referenced but never `#define`'d — fixed).
+- `SPI_Init` now sets `SSM`/`SSI` (`CR1` bits 9/8) — without them, the peripheral trips a Mode Fault and silently drops out of master mode right after init (since CS here is a plain GPIO, not the hardware `NSS` pin), and every `SPI_TransferByte` times out immediately. Found via real hardware testing: SD `sd_init()` failed at the very first dummy byte, before the card was even involved. See `notes.md` for the full explanation.
 
 ### SD card over SPI (`sd.c/h`) — done
 `sd_send_command`, `sd_init`, `sd_read_block`, `sd_write_block`. SPI-mode SD, not the board's onboard SDIO slot (see `notes.md` for why SDIO was skipped for v1).
 - Every `SPI_TransferByte` call is now checked for a timeout and aborts (deselecting CS) instead of silently continuing on a failed transfer — previously the return value was ignored everywhere in this file.
 - `sd_init` now remembers the SDHC/SDSC (`is_sdhc`) flag it detects from the OCR and `sd_read_block`/`sd_write_block` convert `addr` to a byte offset for SDSC cards — previously `is_sdhc` was computed but never used, so an SDSC card would have been addressed incorrectly.
-- **Not yet wired into `app.c`** — `sd_init`/`SPI_Init` aren't called from the application layer yet, so the datalogger below isn't reachable at runtime.
-- **Limitation:** nothing enforces the SD spec's ≤400kHz SPI clock requirement during the CMD0/CMD8/ACMD41 identification phase — the `SPI_Init` prescaler is entirely the caller's responsibility.
+- **Limitation:** nothing in `sd.c` itself enforces the SD spec's ≤400kHz SPI clock requirement during the CMD0/CMD8/ACMD41 identification phase — `app.c` handles it by calling `SPI_Init` with a slow prescaler before `sd_init` and a fast one after, but a different caller could get this wrong.
 
 ### Datalogger (`log.c/h`) — done
-`log_init`, `log_append_reading`, `log_save_position`, `log_flush`. Buffers 64 8-byte `LogRecord`s (timestamp, temp×100, door state) per 512-byte SD block, tracks the next-write block in a reserved metadata block. Built on `sd.c` — same "not yet wired into `app.c`" caveat as above.
+`log_init`, `log_append_reading`, `log_save_position`, `log_flush`. Buffers 64 8-byte `LogRecord`s (timestamp, temp×100, door state) per 512-byte SD block, tracks the next-write block in a reserved metadata block. Built on `sd.c`.
+- Wired into `app.c`: `App_Init()` brings up SPI1 + the card (`SD_SPI`/`SD_TIM`=TIM5/`SD_CS_PORT`+`SD_CS_PIN`=PA4), `App_Loop()` calls `log_append_reading()` right after the existing UART temp print, whenever both the card and the RTC read succeeded.
+- **Limitation:** `timestamp` is seconds-since-midnight, not a real epoch (the RTC driver doesn't expose one) — fine for ordering readings within a day, wraps at midnight. `door_state` is hardcoded to `0`, no door sensor exists yet.
 
 ## Not started (needed for flight controller)
 
