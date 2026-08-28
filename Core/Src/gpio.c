@@ -12,8 +12,8 @@ void GPIO_Init(GPIO_TypeDef *port, uint8_t pin, GPIO_Mode mode, GPIO_OutputType 
     port->MODER &= ~(0b11U << (pin * 2)); // Clear MODER bits
     port->MODER |= (mode << (pin * 2));   // Set MODER to requested mode
 
-    // Set OTYPER
-    if (mode == OUTPUT) {
+    // Set OTYPER - applies to OUTPUT and ALT_FUNC modes (both drive the pin)
+    if (mode == OUTPUT || mode == ALT_FUNC) {
         port->OTYPER &= ~(0b1U << pin); // Clear OTYPER bit
         port->OTYPER |= (type << pin);  // Set OTYPER
     }

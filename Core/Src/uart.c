@@ -1,4 +1,5 @@
 #include "uart.h"
+#include "clock.h"
 #include <math.h>
 
 /*
@@ -41,7 +42,7 @@
  *   - No flow control
  */
 
-static const uint32_t fCK = 16000000U; // Clock speed of USART
+static const uint32_t fCK = FCK_HZ; // Clock speed of USART
 
 void UART_Init(USART_TypeDef *port, uint32_t baudRate) {
 
@@ -119,9 +120,9 @@ void UART_Init(USART_TypeDef *port, uint32_t baudRate) {
 
     port->CR1 = (0b1U << 13 ) | (0b1U << 3) | (0b1U << 2) | (0b0U << 12);
 
-    // Set stop bit to 00 (1 stop bit)
+    // Set stop bit to 00 (1 stop bit) - STOP[1:0] is CR2 bits 13:12
 
-    port->CR2 = (0b00U << 13);
+    port->CR2 = (0b00U << 12);
 
 }
 

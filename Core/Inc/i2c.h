@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include "stm32f4xx.h"
-#include <tim.h>
+#include "tim.h"
 
 typedef enum {
     SPEED_STANDARD,

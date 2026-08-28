@@ -1,6 +1,7 @@
 #include "pwm.h"
+#include "clock.h"
 
-static const uint32_t fCK = 16000000U; // Clock speed of TIM
+static const uint32_t fCK = FCK_HZ; // Clock speed of TIM
 
 void PWM_Init(TIM_TypeDef *port, uint8_t channel, uint32_t frequency, uint8_t dutyCycle) {
 
@@ -21,8 +22,8 @@ void PWM_Init(TIM_TypeDef *port, uint8_t channel, uint32_t frequency, uint8_t du
     port->PSC = (fCK / (1000U * frequency)) - 1U; // Set pre-scaler to clock speed / 1000 / the desired frequency
 
     if (channel == 2) {
-        port->CCMR1 &= ~(0b1111U << 11); // Clear OC1M & OC1PE bits
-        port->CCMR1 |= 0b1101U << 11; // Set OC1M bits to PWM mode 1 and OC1PE to 1 (preload enabled)
+        port->CCMR1 &= ~(0b1111U << 11); // Clear OC2M & OC2PE bits
+        port->CCMR1 |= 0b1101U << 11; // Set OC2M bits to PWM mode 1 and OC2PE to 1 (preload enabled)
 
         port->CCR2 = dutyCycle * 10; // ARR is set to 1000 and dutyCycle is 0-100, scaled to 0-1000 range
     }

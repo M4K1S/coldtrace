@@ -1,5 +1,21 @@
 #include "sd.h"
 
+// Set by sd_init() from the CCS bit in the OCR - SDHC/SDXC cards address
+// blocks by block number, SDSC cards address by raw byte offset. Every
+// sd_read_block/sd_write_block call converts addr accordingly.
+static uint8_t sd_card_is_sdhc = 0;
+
+// Wraps SPI_TransferByte with the timeout check every call needs. On a SPI
+// timeout, deselects the card (any in-progress command frame is abandoned)
+// and returns 0 so callers can bail out uniformly.
+static uint8_t sd_xfer(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, uint8_t byte_in, uint8_t *byte_out) {
+    if (!SPI_TransferByte(spi_port, tim_port, byte_in, byte_out)) {
+        GPIO_Set(cs_port, cs_pin, 1); // deselect on SPI timeout
+        return 0;
+    }
+    return 1;
+}
+
 uint8_t sd_send_command(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, uint8_t cmd, uint32_t arg, uint8_t crc, uint8_t has_extra, uint8_t *extra_bytes) {
     uint8_t dummy;
     uint8_t response = 0xFF; // Will hold card's R1 response - no real response can ever equal this because bit 7 must be 0
@@ -7,16 +23,16 @@ uint8_t sd_send_command(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeD
     GPIO_Set(cs_port, cs_pin, 0); // select the card
 
     // Send the 6-byte command frame
-    SPI_TransferByte(spi_port, tim_port, 0x40 | cmd, &dummy);          // byte 0: start/transmission bits (01) + cmd number
-    SPI_TransferByte(spi_port, tim_port, (arg >> 24) & 0xFF, &dummy);  // 32-bit argument, MSB first
-    SPI_TransferByte(spi_port, tim_port, (arg >> 16) & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (arg >> 8)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (arg >> 0)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, crc, &dummy);                 // CRC + stop bit
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0x40 | cmd, &dummy)) return 0xFF;          // byte 0: start/transmission bits (01) + cmd number
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (arg >> 24) & 0xFF, &dummy)) return 0xFF;  // 32-bit argument, MSB first
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (arg >> 16) & 0xFF, &dummy)) return 0xFF;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (arg >> 8)  & 0xFF, &dummy)) return 0xFF;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (arg >> 0)  & 0xFF, &dummy)) return 0xFF;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, crc, &dummy)) return 0xFF;                 // CRC + stop bit
 
     // Poll for the R1 response - keep clocking 0xFF until the top bit clears, or give up
     for (uint8_t i = 0; i < SD_RESPONSE_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &response)) return 0xFF;
         if ((response & 0x80) == 0) { // top bit clear - valid response byte
             break;
         }
@@ -25,7 +41,7 @@ uint8_t sd_send_command(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeD
     // R3/R7 responses have 4 extra trailing bytes - read them before releasing CS
     if (has_extra) {
         for (uint8_t i = 0; i < 4; i++) {
-            SPI_TransferByte(spi_port, tim_port, 0xFF, &extra_bytes[i]);
+            if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &extra_bytes[i])) return 0xFF;
         }
     }
 
@@ -39,11 +55,13 @@ uint8_t sd_init(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_p
     uint8_t response;
     uint8_t extra[4];
 
+    sd_card_is_sdhc = 0; // reset until CMD58 confirms otherwise
+
     GPIO_Set(cs_port, cs_pin, 1); // deselect the card
 
     // Send 10 dummy bytes to get 74 clock pulses (74/8 = 9.25, round up to 10)
     for (uint8_t i = 0; i < 10; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &dummy);
+        if (!SPI_TransferByte(spi_port, tim_port, 0xFF, &dummy)) return 0; // SPI timed out before the card even saw a command
     }
 
     // Send CMD0 - expect idle state (0x01)
@@ -74,6 +92,7 @@ uint8_t sd_init(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_p
     if (response != 0x00) return 0;
 
     *is_sdhc = (extra[0] & 0x40) ? 1 : 0; // bit 6 of OCR byte 0 = CCS
+    sd_card_is_sdhc = *is_sdhc; // remember for sd_read_block/sd_write_block addressing
 
     return 1; // success
 }
@@ -82,20 +101,23 @@ uint8_t sd_read_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef
     uint8_t dummy;
     uint8_t response;
 
+    // SDHC/SDXC cards address by block number; SDSC cards need a raw byte offset
+    uint32_t card_addr = sd_card_is_sdhc ? addr : (addr * SD_BLOCK_SIZE);
+
     GPIO_Set(cs_port, cs_pin, 0); // select the card
 
     // Send CMD17's 6-byte frame directly (CS must remain LOW)
-    SPI_TransferByte(spi_port, tim_port, 0x40 | SD_CMD17, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 24) & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 16) & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 8)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 0)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, SD_DUMMY_CRC, &dummy);
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0x40 | SD_CMD17, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 24) & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 16) & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 8)  & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 0)  & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, SD_DUMMY_CRC, &dummy)) return 0;
 
     // Poll for the R1 response
     response = 0xFF;
     for (uint8_t i = 0; i < SD_RESPONSE_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &response)) return 0;
         if ((response & 0x80) == 0) break;
     }
     if (response != 0x00) {
@@ -106,7 +128,7 @@ uint8_t sd_read_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef
     // Poll for the data start token - needs many more tries, card is physically reading flash
     uint8_t got_token = 0;
     for (uint16_t i = 0; i < SD_DATA_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &response)) return 0;
         if (response == SD_DATA_START_TOKEN) {
             got_token = 1;
             break;
@@ -119,12 +141,12 @@ uint8_t sd_read_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef
 
     // Read the 512 data bytes into the caller's buffer
     for (uint16_t i = 0; i < SD_BLOCK_SIZE; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &buf[i]);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &buf[i])) return 0;
     }
 
     // Read and discard the 2 trailing CRC bytes
-    SPI_TransferByte(spi_port, tim_port, 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, 0xFF, &dummy);
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &dummy)) return 0;
 
     GPIO_Set(cs_port, cs_pin, 1); // deselect the card
 
@@ -135,18 +157,21 @@ uint8_t sd_write_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDe
     uint8_t dummy;
     uint8_t response;
 
+    // SDHC/SDXC cards address by block number; SDSC cards need a raw byte offset
+    uint32_t card_addr = sd_card_is_sdhc ? addr : (addr * SD_BLOCK_SIZE);
+
     GPIO_Set(cs_port, cs_pin, 0); // select the card
 
-    SPI_TransferByte(spi_port, tim_port, 0x40 | SD_CMD24, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 24) & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 16) & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 8)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, (addr >> 0)  & 0xFF, &dummy);
-    SPI_TransferByte(spi_port, tim_port, SD_DUMMY_CRC, &dummy);
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0x40 | SD_CMD24, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 24) & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 16) & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 8)  & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, (card_addr >> 0)  & 0xFF, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, SD_DUMMY_CRC, &dummy)) return 0;
 
     response = 0xFF;
     for (uint8_t i = 0; i < SD_RESPONSE_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &response)) return 0;
         if ((response & 0x80) == 0) break;
     }
     if (response != 0x00) {
@@ -154,20 +179,20 @@ uint8_t sd_write_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDe
         return 0; // card rejected the write command
     }
 
-    SPI_TransferByte(spi_port, tim_port, SD_DATA_START_TOKEN, &dummy);
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, SD_DATA_START_TOKEN, &dummy)) return 0;
 
     for (uint16_t i = 0; i < SD_BLOCK_SIZE; i++) {
-        SPI_TransferByte(spi_port, tim_port, buf[i], &dummy);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, buf[i], &dummy)) return 0;
     }
 
     // Send 2 dummy CRC bytes
-    SPI_TransferByte(spi_port, tim_port, SD_DUMMY_CRC, &dummy);
-    SPI_TransferByte(spi_port, tim_port, SD_DUMMY_CRC, &dummy);
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, SD_DUMMY_CRC, &dummy)) return 0;
+    if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, SD_DUMMY_CRC, &dummy)) return 0;
 
     // Poll for data response token
     uint8_t got_token = 0;
     for (uint16_t i = 0; i < SD_DATA_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &response)) return 0;
         if ((response & SD_DATA_ACCEPTED_MASK) == SD_DATA_ACCEPTED_VALUE) {
             got_token = 1;
             break;
@@ -182,7 +207,7 @@ uint8_t sd_write_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDe
     uint8_t busy_response = 0x00;
     uint8_t finished = 0;
     for (uint16_t i = 0; i < SD_DATA_TIMEOUT_TRIES; i++) {
-        SPI_TransferByte(spi_port, tim_port, 0xFF, &busy_response);
+        if (!sd_xfer(spi_port, tim_port, cs_port, cs_pin, 0xFF, &busy_response)) return 0;
         if (busy_response == 0xFF) {
             finished = 1;
             break; // no longer busy
@@ -197,4 +222,3 @@ uint8_t sd_write_block(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDe
 
     return 1; // success
 }
-

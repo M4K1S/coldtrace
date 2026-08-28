@@ -1,6 +1,9 @@
 #include "spi.h"
+#include "clock.h"
 
-static const uint32_t fCK = 16000000U; // Clock speed of SPI
+#define SPI_TIMEOUT_US 5000U // 5ms timeout for SPI
+
+static const uint32_t fCK = FCK_HZ; // Clock speed of SPI
 
 void SPI_Init(SPI_TypeDef *port, SPI_Prescaler prescaler, TIM_TypeDef *tim_port) {
     if (port == SPI1) {

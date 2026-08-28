@@ -1,6 +1,7 @@
 #include "tim.h"
+#include "clock.h"
 
-static const uint32_t fCK = 16000000U; // Clock speed of TIM
+static const uint32_t fCK = FCK_HZ; // Clock speed of TIM
 
 static void TIM_EnableClock(TIM_TypeDef *port) {
     if      (port == TIM2) RCC->APB1ENR |= (0b1U << 0); // Start TIM2 clock

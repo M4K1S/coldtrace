@@ -1,8 +1,9 @@
 #include "i2c.h"
+#include "clock.h"
 
 #define I2C_TIMEOUT_US 5000U // 5ms timeout for I2C
 
-static const uint32_t fCK = 16000000U; // Clock speed of i2C
+static const uint32_t fCK = FCK_HZ; // Clock speed of i2C
 static const uint32_t fastCK = 400000U;
 static const uint32_t standCK = 100000U;
 

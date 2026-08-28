@@ -2,7 +2,6 @@
 #define APP_H
 
 #include <stdint.h>
-#include "stm32f4xx_hal.h"
 #include "gpio.h"
 #include "uart.h"
 #include "tim.h"
