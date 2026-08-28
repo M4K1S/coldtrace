@@ -1,60 +1,37 @@
-# BareMetal STM32F446RE Drivers
+# BareMetal — Cold-Storage Monitor
 
-Register-level (no HAL) drivers for the Nucleo-F446RE, built toward a flight controller.
+Application layer for an STM32F446RE (Nucleo-F446RE) temperature/RTC/SD datalogger. Register-level peripheral drivers (no HAL) live in a separate repo, pulled in here as a git submodule — see below.
 
 ## Board notes
 
 - **Clock:** HSE via ST-LINK MCO must use `RCC_HSE_BYPASS`, not `RCC_HSE_ON` — there is no physical crystal on this board.
 - **LD2 (onboard LED):** PA5, wired **active-low** (pin LOW = ON). Use `TIM_OCPOLARITY_LOW` if driving it via PWM.
-- **PA1** doubles as **TIM2_CH2** — used for the PWM driver below.
+- **PA1** doubles as **TIM2_CH2** — used by the PWM driver.
 
-## Driver status
+## Driver library (submodule)
 
-### GPIO (`gpio.c/h`) — done
-`GPIO_Init`, `GPIO_SetMode`, `GPIO_Set`, `GPIO_Toggle`, `GPIO_Read`. Input/Output/AltFunc/Analog modes, push-pull or open-drain output type.
-- `GPIO_Init` applies `OTYPER` (push-pull/open-drain) for both `OUTPUT` and `ALT_FUNC` modes — it used to only apply it for `OUTPUT`, silently dropping open-drain config on any AF pin.
-- **Limitation:** no `PUPDR` (pull-up/down) or `OSPEEDR` (speed) control — peripherals that need an internal pull-up (I2C) configure those registers by hand instead of going through `GPIO_Init`.
+The GPIO/UART/TIM/PWM/I2C/SPI/OneWire/DS18B20/DS3231/SD drivers used by this project live in [`BareMetalDrivers/`](BareMetalDrivers/), a submodule pointing at [stm32-baremetal-drivers](https://github.com/M4K1S/stm32-baremetal-drivers). See that repo's own README and `notes.md` for driver-level documentation (register sequences, timing math, datasheet values, and the bug writeups for things like the SPI `SSM`/`SSI` Mode Fault and SDHC/SDSC addressing).
 
-### UART (`uart.c/h`) — done
-`UART_Init`, `UART_SendChar`, `UART_SendString`, `UART_ReceiveChar`, `UART_WaitForTC`, `UART_DataAvailable`.
-Supports USART1/2/3, UART4/5, USART6. 8N1 only, no flow control.
-- **Limitation:** `UART_ReceiveChar` is **blocking** (spins on RXNE). No non-blocking/interrupt/DMA receive yet — added a `UART_DataAvailable()` check in the app layer as a workaround.
-- **Limitation:** no echo, no line-buffering — handled at the application layer intentionally (kept driver generic).
+**Cloning this repo:** the submodule isn't populated by a plain `git clone` — run:
+```bash
+git clone --recurse-submodules <this-repo-url>
+```
+or, if already cloned without that flag:
+```bash
+git submodule update --init
+```
 
-### TIM base (`tim.c/h`) — done
-`TIM_Init` (explicit PSC/ARR), `TIM_Delay_us`, `TIM_Delay_ms`, `TIM_Start`, `TIM_Stop`, `TIM_Ready` (polls/clears UIF).
-- **Limitation:** no interrupt-driven mode — `TIM_Ready()` requires polling.
-- Every subsystem that needs microsecond timing (OneWire, I2C, SPI) gets its own dedicated `TIM_TypeDef*` passed in rather than sharing one timer — see `app.c`'s `TEMP_TIM`/`RTC_TIM`/`DELAY_TIM`.
+**Updating to a newer driver version:** this repo is pinned to one specific commit of the driver repo, on purpose — it does *not* auto-update when the driver repo changes. To pull in a newer driver version deliberately:
+```bash
+cd BareMetalDrivers
+git pull origin main      # or check out whatever commit/tag you want
+cd ..
+git add BareMetalDrivers
+git commit -m "Bump BareMetalDrivers to <reason>"
+```
+That commit is what actually "locks in" the update for this project — until you do that, this repo keeps building against whatever commit it's currently pinned to, even if the driver repo has moved on.
 
-### PWM (`pwm.c/h`) — done
-`PWM_Init`, `PWM_Start`, `PWM_SetDuty`, `PWM_Stop`. PWM Mode 1, preload enabled (`OCxPE`), 1000-count period (ARR=999).
-- **Limitation: only TIM2 Channel 2 (PA1) is implemented.** `channel` param exists but all internal logic is gated on `channel == 2` — passing 1/3/4 silently does nothing.
-- **Limitation:** `dutyCycle` is 0-100, not range-checked — values >100 overflow past ARR and just pin the output at 100%.
-- `fCK` now comes from the shared `FCK_HZ` define in `clock.h` (was duplicated as a local constant in every peripheral driver) — confirm it still matches the project's actual `SystemClock_Config()` before trusting frequency output.
-
-### I2C (`i2c.c/h`) — done
-`I2C_Init`, `I2C_Start`, `I2C_Stop`, `I2C_SendAddress`, `I2C_WriteByte`, `I2C_ReadByte`, `I2C_WriteReg`, `I2C_ReadReg`, `I2C_WriteBytes`, `I2C_ReadBytes`. I2C1 (PB8=SCL/PB9=SDA), Standard (100kHz) or Fast (400kHz) mode. Timeout-guarded (`I2C_TIMEOUT_US`) via a caller-supplied `tim_port` — see `notes.md` for the full register sequence.
-- **Limitation:** I2C1 only wired up.
-
-### OneWire (`onewire.c/h`) — done
-`ow_init`, `ow_reset`, `ow_write_bit`, `ow_read_bit`, `ow_write_byte`, `ow_read_byte`. Bit-banged over GPIO, timed via a dedicated `TIM_Delay_us`.
-
-### DS3231 RTC (`ds3231.c/h`) — done
-`rtc_set_time`, `rtc_get_time`, `rtc_time_is_valid`, `bcd_to_dec`/`dec_to_bcd`. Built on I2C; `App_Init()` prompts for a time-set over UART only when `rtc_time_is_valid()` (OSF flag) says the clock lost power.
-
-### DS18B20 temp sensor (`ds18b20.c/h`) — done
-`ds18b20_start_conversion`, `ds18b20_read_temp`. Built on OneWire.
-- `ds18b20_read_temp` now reads the full 9-byte scratchpad and checks it against the DS18B20's own Dallas/Maxim CRC8 (byte 8), rejecting the reading on a mismatch — it used to trust the 2 temperature bytes unconditionally with no way to detect a corrupted 1-Wire transfer.
-
-### SPI (`spi.c/h`) — done
-`SPI_Init`, `SPI_TransferByte`. SPI1 (PA5/6/7), Mode 0, 8-bit frames, selectable prescaler (÷2-÷256). Timeout-guarded (`SPI_TIMEOUT_US`, was referenced but never `#define`'d — fixed).
-- `SPI_Init` now sets `SSM`/`SSI` (`CR1` bits 9/8) — without them, the peripheral trips a Mode Fault and silently drops out of master mode right after init (since CS here is a plain GPIO, not the hardware `NSS` pin), and every `SPI_TransferByte` times out immediately. Found via real hardware testing: SD `sd_init()` failed at the very first dummy byte, before the card was even involved. See `notes.md` for the full explanation.
-
-### SD card over SPI (`sd.c/h`) — done
-`sd_send_command`, `sd_init`, `sd_read_block`, `sd_write_block`. SPI-mode SD, not the board's onboard SDIO slot (see `notes.md` for why SDIO was skipped for v1).
-- Every `SPI_TransferByte` call is now checked for a timeout and aborts (deselecting CS) instead of silently continuing on a failed transfer — previously the return value was ignored everywhere in this file.
-- `sd_init` now remembers the SDHC/SDSC (`is_sdhc`) flag it detects from the OCR and `sd_read_block`/`sd_write_block` convert `addr` to a byte offset for SDSC cards — previously `is_sdhc` was computed but never used, so an SDSC card would have been addressed incorrectly.
-- **Limitation:** nothing in `sd.c` itself enforces the SD spec's ≤400kHz SPI clock requirement during the CMD0/CMD8/ACMD41 identification phase — `app.c` handles it by calling `SPI_Init` with a slow prescaler before `sd_init` and a fast one after, but a different caller could get this wrong.
+## App layer
 
 ### Datalogger (`log.c/h`) — done
 `log_init`, `log_append_reading`, `log_save_position`, `log_flush`. Buffers 64 8-byte `LogRecord`s (timestamp, temp×100, door state) per 512-byte SD block, tracks the next-write block in a reserved metadata block. Built on `sd.c`.

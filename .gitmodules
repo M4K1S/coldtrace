@@ -1,0 +1,3 @@
+[submodule "BareMetalDrivers"]
+	path = BareMetalDrivers
+	url = https://github.com/M4K1S/stm32-baremetal-drivers

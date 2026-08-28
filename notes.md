@@ -1,5 +1,7 @@
 # Bare-Metal STM32F446 Peripheral Notes
 
+> **Note:** the driver source these notes describe now lives in [`BareMetalDrivers/`](BareMetalDrivers/) (the [stm32-baremetal-drivers](https://github.com/M4K1S/stm32-baremetal-drivers) submodule), which has its own copy of this file — that's the canonical, actively-maintained version going forward. This copy is left here as a historical snapshot from when the driver code still lived directly in this repo; it may drift out of date.
+
 Step-by-step register sequences for each peripheral, plus the math behind any timing calculations. Written as a personal reference for how/why each driver was built.
 
 ---
