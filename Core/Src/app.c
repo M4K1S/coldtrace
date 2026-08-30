@@ -6,6 +6,7 @@
 #include "spi.h"
 #include "sd.h"
 #include "log.h"
+#include "ssd1306.h"
 
 // DS18B20 data line + the timer dedicated to OneWire's microsecond delays
 #define TEMP_PORT GPIOA
@@ -25,9 +26,27 @@
 #define SD_CS_PORT GPIOA
 #define SD_CS_PIN  4
 
+// SSD1306 on its own I2C3 bus (PA8=SCL, PC9=SDA) - separate pins from the
+// RTC's I2C1. PB10/PB11 (I2C2) aren't broken out on this Nucleo board, so
+// I2C3 is used instead. Timeout timer is just a shared microsecond tick,
+// safe to reuse since I2C calls are blocking/sequential, never concurrent.
+#define OLED_I2C I2C3
+#define OLED_TIM RTC_TIM
+
 // Set once in App_Init if the SD card + log layer both came up cleanly;
 // App_Loop checks this before every log_append_reading() call
 static uint8_t sd_logging_ready = 0;
+
+// Set once in App_Init if the SSD1306 ACKed its init sequence
+static uint8_t oled_ready = 0;
+
+// No WiFi hardware/driver wired up yet - keep the icon hidden until there is
+static const uint8_t wifi_connected = 0;
+
+// Timestamp of the last successful SD log write, shown next to the refresh
+// icon; have_last_refresh stays 0 until the first write succeeds
+static RTC_Time last_refresh_time;
+static uint8_t have_last_refresh = 0;
 
 // Prints a signed float with 2 decimal places, no libc float-printf dependency
 static void UART_SendTemp(USART_TypeDef *port, float tempC) {
@@ -119,6 +138,12 @@ void App_Init(void)
         set_time_from_uart();
     }
 
+    I2C_Init(OLED_I2C, SPEED_STANDARD, OLED_TIM);
+    oled_ready = ssd1306_init(OLED_I2C, OLED_TIM);
+    if (!oled_ready) {
+        UART_SendString(USART2, "SSD1306 not found - display disabled.\r\n");
+    }
+
     // CS starts deselected (HIGH) before anything touches the SD card
     GPIO_Init(SD_CS_PORT, SD_CS_PIN, OUTPUT, PUSH_PULL);
     GPIO_Set(SD_CS_PORT, SD_CS_PIN, 1);
@@ -193,7 +218,18 @@ void App_Loop(void)
 
         if (!log_append_reading(SD_SPI, SD_TIM, SD_CS_PORT, SD_CS_PIN, tempC, timestamp, door_state)) {
             UART_SendString(USART2, "SD log write failed\r\n");
+        } else {
+            last_refresh_time = time;
+            have_last_refresh = 1;
         }
+    }
+
+    if (oled_ready) {
+        int32_t temp_centi = (int32_t)(tempC * 100.0f + (tempC >= 0.0f ? 0.5f : -0.5f));
+        oled_draw_status_screen(wifi_connected, sd_logging_ready,
+                                 have_last_refresh, last_refresh_time.hours, last_refresh_time.minutes,
+                                 1, temp_centi);
+        oled_update(OLED_I2C, OLED_TIM);
     }
 
     TIM_Delay_ms(DELAY_TIM, 250); // ~1s total loop period including the 750ms conversion wait
