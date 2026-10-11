@@ -22,3 +22,8 @@ hardware/kicad/*.lck
 hardware/kicad/*.kicad_prl
 hardware/kicad/fp-info-cache
 ~*.lck
+
+# Server runtime data and secrets
+server/*.jsonl
+server/*.json
+server/admin_password.txt

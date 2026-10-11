@@ -93,7 +93,7 @@ u32 key (yymmddhh, local time) | i16 min | i16 max | i16 avg (x100 °C) | u16 do
 
 ### Server
 
-A small Flask app in a separate repo, [coldtrace-server](https://github.com/M4K1S/coldtrace-server), deployed on PythonAnywhere.
+A single-file Flask app in [`server/`](server/) (setup, files and admin password in [`server/README.md`](server/README.md)), deployed on PythonAnywhere.
 
 | Route | Purpose |
 |---|---|
@@ -122,6 +122,7 @@ If you cloned without `--recurse-submodules`, run `git submodule update --init`.
 ## Repository layout
 
 ```
+server/          Flask server (flask_app.py)
 Core/            application (app.c main logic, log.c hourly SD records)
 BareMetalDrivers/  register-level drivers (submodule)
 hardware/kicad/  schematic
