@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ColdTrace Quick Guide</title>
+<style>
+  @page { size: letter; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1a1a1a; font-size: 10.5pt; line-height: 1.35; margin: 0 auto; max-width: 7.5in; }
+  h1 { font-size: 20pt; margin: 0 0 2px; }
+  .sub { color: #555; margin: 0 0 10px; }
+  h2 { font-size: 12pt; margin: 12px 0 4px; border-bottom: 1.5px solid #1a1a1a; padding-bottom: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: middle; }
+  td.dot { width: 34px; text-align: center; }
+  .d { display: inline-block; width: 14px; height: 14px; border-radius: 50%; }
+  .green { background: #2e9e4f; } .amber { background: #f2a93b; } .red { background: #d9342b; } .off { background: #fff; border: 1.5px solid #999; }
+  td.what { width: 190px; font-weight: 600; }
+  ul { margin: 4px 0; padding-left: 18px; } li { margin: 2px 0; }
+  .box { border: 1.5px solid #1a1a1a; border-radius: 6px; padding: 6px 10px; margin-top: 8px; }
+  .fill { border-bottom: 1px solid #1a1a1a; display: inline-block; min-width: 2.4in; }
+  .small { font-size: 8.5pt; color: #555; margin-top: 10px; }
+  .cols { display: flex; gap: 18px; } .cols > div { flex: 1; }
+</style>
+</head>
+<body>
+  <h1>ColdTrace Quick Guide</h1>
+  <p class="sub">Temperature and door monitor for this fridge/freezer. It watches the temperature, sounds an alarm, and sends readings to a web dashboard.</p>
+
+  <h2>What the lights and sounds mean</h2>
+  <table>
+    <tr><td class="dot"><span class="d green"></span></td><td class="what">Green blip every 5 seconds</td><td>Working normally. Nothing to do.</td></tr>
+    <tr><td class="dot"><span class="d amber"></span></td><td class="what">Amber flashing slowly</td><td>The door is open.</td></tr>
+    <tr><td class="dot"><span class="d amber"></span></td><td class="what">Amber flashing fast, short beep every 5 seconds</td><td>The door has been open over 1 minute. Close it.</td></tr>
+    <tr><td class="dot"><span class="d red"></span></td><td class="what">Red flashing and buzzer</td><td><b>Too warm</b> for longer than the alarm delay (15 minutes unless changed). See "If the red alarm sounds".</td></tr>
+    <tr><td class="dot"><span class="d red"></span></td><td class="what">Red flashing slowly, silent</td><td>The alarm was muted, but it is still too warm.</td></tr>
+    <tr><td class="dot"><span class="d off"></span></td><td class="what">No light at all</td><td>No power or a fault. Check the plug and call for help.</td></tr>
+  </table>
+
+  <div class="cols">
+    <div>
+      <h2>The mute button</h2>
+      <ul>
+        <li><b>Press:</b> silence the buzzer for 15 minutes.</li>
+        <li><b>Hold for 3 seconds:</b> silence for 12 hours.</li>
+        <li><b>Press again while muted:</b> turn the alarm back on.</li>
+        <li>The screen shows a speaker icon with the time left.</li>
+        <li>After power-up it stays muted for 15 minutes.</li>
+      </ul>
+    </div>
+    <div>
+      <h2>The screen</h2>
+      <ul>
+        <li>Large number: current temperature in °C.</li>
+        <li>Top left: WiFi icon (connected) and SD card icon (recording).</li>
+        <li>Top right: the clock.</li>
+        <li>No WiFi icon: it keeps recording on the card and sends the missing hours when WiFi returns.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>If the red alarm sounds</h2>
+  <ul>
+    <li>Make sure the door is fully closed and the unit is running (compressor on, not unplugged).</li>
+    <li>Check the food with a hand thermometer. Do not rely on the display alone.</li>
+    <li>If it stays warm, move the food to another cold unit and call for service.</li>
+  </ul>
+
+  <h2>Please don't</h2>
+  <ul>
+    <li>Unplug the unit, cover the sensor, or let the probe cable get pinched in the door seal.</li>
+    <li>Get the case wet, or put it inside the fridge or freezer. Only the thin probe goes inside.</li>
+  </ul>
+
+  <div class="box">
+    <p style="margin:0 0 4px"><b>Live dashboard:</b> <span class="fill">&nbsp;</span> (shows live temperature, door state, and a graph for each past day)</p>
+    <p style="margin:0"><b>Questions or problems, call:</b> <span class="fill">&nbsp;</span> &nbsp; <b>Name:</b> <span class="fill" style="min-width:1.6in">&nbsp;</span></p>
+  </div>
+
+  <p class="small">ColdTrace is a monitoring aid, not a certified food-safety instrument. Continue your regular manual temperature checks and record-keeping.</p>
+</body>
+</html>
