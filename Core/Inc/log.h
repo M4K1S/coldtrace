@@ -8,22 +8,37 @@
 #include "tim.h"
 #include "gpio.h"
 
+// One 16-byte record per hour; SD block 0 holds the count, records start at block 1
 typedef struct {
-    uint32_t timestamp;  // 4 BYTES
-    int16_t  temp_x100;  // 2 BYTES - temperature * 100, stored as a signed int (avoids storing a raw float)
-    uint8_t  door_state; // 1 BYTE
-    uint8_t  reserved;   // 1 BYTE  - padding, keeps the struct a clean 8 bytes
-} LogRecord;
+    uint32_t key;          // yymmddhh, e.g. 26100914 = 2026-10-09 14:00 local
+    int16_t  min_x100;     // temperatures x100
+    int16_t  max_x100;
+    int16_t  avg_x100;
+    uint16_t door_samples; // readings with the door open
+    uint16_t samples;      // readings in the hour
+    uint16_t marker;       // HOUR_MARKER: slot is written
+} HourRecord;              // 16 bytes, no padding
 
-#define LOG_METADATA_BLOCK    0U    // reserved block, stores the "next write block" pointer
-#define LOG_FIRST_DATA_BLOCK  1U    // actual log records start here
-#define LOG_RECORDS_PER_BLOCK (SD_BLOCK_SIZE / sizeof(LogRecord)) // 512/8 = 64
-#define LOG_INVALID_MARKER    0xFFFFFFFFU // a blank/erased SD card reads as all 1s
+#define HOUR_META_BLOCK        0U
+#define HOUR_FIRST_DATA_BLOCK  1U
+#define HOUR_RECORDS_PER_BLOCK (SD_BLOCK_SIZE / sizeof(HourRecord)) // 32
+#define HOUR_META_MAGIC        0x48524C59U // "HRLY"
+#define HOUR_MARKER            0xA55AU
 
-uint8_t log_init(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin);
-uint8_t log_append_reading(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, float temp, uint32_t timestamp, uint8_t door_state);
-uint8_t log_save_position(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, uint32_t next_block);
-uint8_t log_flush(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin);
+// Running stats for the hour in progress
+typedef struct {
+    uint32_t key;
+    float    min, max, sum;
+    uint32_t n, door_n;
+} HourAcc;
+
+uint32_t hour_key(uint8_t yy, uint8_t mm, uint8_t dd, uint8_t hh);
+uint8_t  hour_acc_add(HourAcc *acc, uint32_t key, float temp, uint8_t door_open, HourRecord *finished);
+
+uint8_t  hourly_init(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin);
+uint8_t  hourly_append(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, const HourRecord *rec);
+uint32_t hourly_count(void);
+uint8_t  hourly_read(SPI_TypeDef *spi_port, TIM_TypeDef *tim_port, GPIO_TypeDef *cs_port, uint8_t cs_pin, uint32_t index, HourRecord *out);
 
 #endif /* INC_LOG_H_ */
 

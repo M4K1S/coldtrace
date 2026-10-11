@@ -9,5 +9,7 @@
 
 void App_Init(void);
 void App_Loop(void);
+uint32_t App_Millis(void);
+void App_TickISR(void);
 
 #endif

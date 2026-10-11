@@ -2,7 +2,6 @@
 Core/Inc/secrets.h
 Debug/
 Release/
-tools/read_log.py
 *.o
 *.d
 *.su
@@ -12,3 +11,14 @@ tools/read_log.py
 *.map
 .metadata/
 .settings/
+build/
+*.bin
+*.hex
+
+# KiCad
+hardware/kicad/.history/
+hardware/kicad/*.bak
+hardware/kicad/*.lck
+hardware/kicad/*.kicad_prl
+hardware/kicad/fp-info-cache
+~*.lck
